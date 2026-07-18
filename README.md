@@ -3,7 +3,7 @@
 Monorepo scaffold for the ApplyPilot autonomous job application agent.
 
 ## Layout
-- `apps/web` - React + Vite frontend
+- `apps/web` - React + Vite frontend with Tailwind CSS
 - `apps/api` - Fastify API
 - `apps/worker` - BullMQ + LangGraph workers
 - `packages/shared` - shared types/utilities
@@ -28,9 +28,10 @@ Monorepo scaffold for the ApplyPilot autonomous job application agent.
 - `POST /jobs/:jobPostingId/plan` runs the planner and returns apply/skip + confidence
 - `POST /jobs/:jobPostingId/tailor` plans first, then tailors only if approved
 - `POST /pipelines/run` enqueues a BullMQ scrape → plan → tailor workflow
-- Web app at `apps/web` includes forms for upload, planner settings, manual job entry, and tailoring
+- Web app at `apps/web` includes forms for upload, planner settings, manual job entry, tailoring, and a Kanban dashboard
 
 ### Queue flow
 1. API enqueues `scrape-queue`
 2. Worker creates jobs and enqueues `plan-queue`
 3. Planner routes `apply` jobs to a `tailor-queue -> track-queue` flow
+4. Manual status changes on the Kanban board update `human_overridden` and log a tracker event

@@ -1,0 +1,19 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply scroll-smooth;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-950 text-slate-100 antialiased;
+    background-image: radial-gradient(circle at top, rgba(30, 41, 59, 0.9), #020617 55%);
+  }
+
+  * {
+    @apply border-slate-800;
+    box-sizing: border-box;
+  }
+}
