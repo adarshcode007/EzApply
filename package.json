@@ -1,0 +1,21 @@
+{
+  "name": "applypilot",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "clean": "turbo clean",
+    "db:generate": "pnpm --filter @applypilot/database db:generate",
+    "db:push": "pnpm --filter @applypilot/database db:push",
+    "db:migrate": "pnpm --filter @applypilot/database db:migrate"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.6.3"
+  }
+}
