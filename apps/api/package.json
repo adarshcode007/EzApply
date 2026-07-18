@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@applypilot/database": "workspace:*",
+    "@applypilot/pipeline": "workspace:*",
     "@applypilot/shared": "workspace:*",
     "@fastify/cors": "^10.0.2",
     "@fastify/multipart": "^9.0.3",

@@ -5,6 +5,7 @@ import fastifyStatic from '@fastify/static';
 import { resumeRoutes } from './routes/resumes.js';
 import { jobRoutes } from './routes/jobs.js';
 import { userRoutes } from './routes/users.js';
+import { pipelineRoutes } from './routes/pipelines.js';
 import { storagePaths } from './lib/storage.js';
 
 export const buildApp = () => {
@@ -24,6 +25,7 @@ export const buildApp = () => {
   app.register(resumeRoutes);
   app.register(jobRoutes);
   app.register(userRoutes);
+  app.register(pipelineRoutes);
 
   app.get('/health', async () => ({
     ok: true,

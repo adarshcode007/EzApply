@@ -1,8 +1,2 @@
-export const queueNames = {
-  scrape: 'scrape-queue',
-  plan: 'plan-queue',
-  tailor: 'tailor-queue',
-  track: 'track-queue',
-} as const;
-
-export type QueueName = (typeof queueNames)[keyof typeof queueNames];
+export { queueNames } from '@applypilot/pipeline';
+export type QueueName = 'scrape-queue' | 'plan-queue' | 'tailor-queue' | 'track-queue';
