@@ -1,9 +1,10 @@
 import type { FastifyPluginAsync } from 'fastify';
 import { z } from 'zod';
+import { and, desc, eq } from 'drizzle-orm';
 import { createManualJob, tailorSingleJob } from '../services/tailor.js';
+import { planSingleJob } from '../services/planner.js';
 import { db } from '../lib/db.js';
 import { applications, jobMatches, jobPostings, users } from '@applypilot/database';
-import { and, desc, eq } from 'drizzle-orm';
 
 const manualJobSchema = z.object({
   title: z.string().min(2),
@@ -15,7 +16,7 @@ const manualJobSchema = z.object({
   postedAt: z.string().datetime().optional(),
 });
 
-const tailorSchema = z.object({
+const userEmailSchema = z.object({
   userEmail: z.string().email(),
 });
 
@@ -49,21 +50,54 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     return { jobPosting };
   });
 
+  app.post('/jobs/:jobPostingId/plan', async (request, reply) => {
+    const params = z.object({ jobPostingId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid jobPostingId' });
+
+    const body = userEmailSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid planner payload', details: body.error.flatten() });
+    }
+
+    try {
+      const result = await planSingleJob({
+        userEmail: body.data.userEmail,
+        jobPostingId: params.data.jobPostingId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      return reply.status(400).send({
+        error: error instanceof Error ? error.message : 'Failed to plan job',
+      });
+    }
+  });
+
   app.post('/jobs/:jobPostingId/tailor', async (request, reply) => {
     const params = z.object({ jobPostingId: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.status(400).send({ error: 'Invalid jobPostingId' });
 
-    const body = tailorSchema.safeParse(request.body);
+    const body = userEmailSchema.safeParse(request.body);
     if (!body.success) {
       return reply.status(400).send({ error: 'Invalid tailor payload', details: body.error.flatten() });
     }
 
     try {
-      const result = await tailorSingleJob({
+      const planner = await planSingleJob({
         userEmail: body.data.userEmail,
         jobPostingId: params.data.jobPostingId,
       });
-      return reply.send(result);
+
+      if (planner.route !== 'tailor') {
+        return reply.send({ planner });
+      }
+
+      const tailored = await tailorSingleJob({
+        userEmail: body.data.userEmail,
+        jobPostingId: params.data.jobPostingId,
+        plannerDecision: planner.plannerDecision,
+      });
+
+      return reply.send({ planner, tailored });
     } catch (error) {
       return reply.status(400).send({
         error: error instanceof Error ? error.message : 'Failed to tailor job',

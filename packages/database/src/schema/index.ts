@@ -59,6 +59,7 @@ export const jobDecisionEnum = pgEnum('job_decision', ['apply', 'skip', 'needs_r
 export const jobMatchStatusEnum = pgEnum('job_match_status', [
   'candidate',
   'rejected',
+  'needs_review',
   'queued_for_tailoring',
 ]);
 

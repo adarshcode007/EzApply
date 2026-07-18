@@ -10,12 +10,14 @@ export default function App() {
   const [result, setResult] = useState<unknown>(null);
   const [jobResult, setJobResult] = useState<unknown>(null);
   const [tailorResult, setTailorResult] = useState<unknown>(null);
+  const [preferencesResult, setPreferencesResult] = useState<unknown>(null);
   const [error, setError] = useState<string | null>(null);
   const [jobPostingId, setJobPostingId] = useState('');
   const [jobTitle, setJobTitle] = useState('Senior Software Engineer');
   const [company, setCompany] = useState('Acme');
   const [jobDescription, setJobDescription] = useState('Build reliable product features with TypeScript, React, and backend APIs.');
   const [jobUrl, setJobUrl] = useState('');
+  const [autonomyThreshold, setAutonomyThreshold] = useState('0.7');
 
   const canSubmit = useMemo(
     () => Boolean(email.trim()) && Boolean(rawText.trim() || file),
@@ -45,6 +47,36 @@ export default function App() {
       }
 
       setResult(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const savePreferences = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    setPreferencesResult(null);
+
+    const parsedThreshold = Number.parseFloat(autonomyThreshold);
+    if (Number.isNaN(parsedThreshold) || parsedThreshold < 0 || parsedThreshold > 1) {
+      setError('Autonomy threshold must be a number between 0 and 1');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${apiUrl}/users/${encodeURIComponent(email)}/preferences`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autonomyThreshold: parsedThreshold }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload?.error ?? 'Failed to save preferences');
+      setPreferencesResult(payload);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -108,8 +140,8 @@ export default function App() {
     <main className="app-shell">
       <section className="hero">
         <p className="eyebrow">ApplyPilot</p>
-        <h1>Resume upload + manual tailoring</h1>
-        <p>Upload a resume, create a job manually, then generate a tailored resume and cover letter.</p>
+        <h1>Resume upload, planner, and manual tailoring</h1>
+        <p>Upload a resume, set your autonomy threshold, create a job manually, then plan and tailor it.</p>
 
         <form className="upload-form" onSubmit={handleSubmit}>
           <label>
@@ -136,6 +168,22 @@ export default function App() {
           </button>
         </form>
 
+        <form className="upload-form" onSubmit={savePreferences}>
+          <h2>Planner settings</h2>
+          <label>
+            Autonomy threshold (0-1)
+            <input
+              type="number"
+              min="0"
+              max="1"
+              step="0.05"
+              value={autonomyThreshold}
+              onChange={(e) => setAutonomyThreshold(e.target.value)}
+            />
+          </label>
+          <button type="submit" disabled={loading}>Save preferences</button>
+        </form>
+
         <form className="upload-form" onSubmit={createManualJob}>
           <h2>Manual job entry</h2>
           <label>
@@ -158,18 +206,19 @@ export default function App() {
         </form>
 
         <form className="upload-form" onSubmit={tailorJob}>
-          <h2>Tailor this job</h2>
+          <h2>Plan and tailor</h2>
           <label>
             Job posting ID
             <input value={jobPostingId} onChange={(e) => setJobPostingId(e.target.value)} />
           </label>
           <button type="submit" disabled={loading || !jobPostingId.trim()}>
-            {loading ? 'Tailoring…' : 'Generate tailored resume'}
+            {loading ? 'Planning…' : 'Run planner + tailor if approved'}
           </button>
         </form>
 
         {error ? <p className="error">{error}</p> : null}
         {result ? <pre className="result">{JSON.stringify(result, null, 2)}</pre> : null}
+        {preferencesResult ? <pre className="result">{JSON.stringify(preferencesResult, null, 2)}</pre> : null}
         {jobResult ? <pre className="result">{JSON.stringify(jobResult, null, 2)}</pre> : null}
         {tailorResult ? <pre className="result">{JSON.stringify(tailorResult, null, 2)}</pre> : null}
       </section>

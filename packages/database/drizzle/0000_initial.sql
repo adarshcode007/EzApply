@@ -13,7 +13,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
- CREATE TYPE "job_match_status" AS ENUM ('candidate', 'rejected', 'queued_for_tailoring');
+ CREATE TYPE "job_match_status" AS ENUM ('candidate', 'rejected', 'needs_review', 'queued_for_tailoring');
 EXCEPTION
  WHEN duplicate_object THEN null;
 END $$;

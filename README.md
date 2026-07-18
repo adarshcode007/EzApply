@@ -17,6 +17,8 @@ Monorepo scaffold for the ApplyPilot autonomous job application agent.
 
 ## Current MVP surface
 - `POST /resumes/upload` accepts a resume file or `rawText` and stores the parsed sections
+- `PUT /users/:email/preferences` saves autonomy threshold settings
 - `POST /jobs/manual` creates a manual job posting
-- `POST /jobs/:jobPostingId/tailor` generates a tailored `.docx` resume and cover letter draft
-- Web app at `apps/web` includes forms for upload, manual job entry, and tailoring
+- `POST /jobs/:jobPostingId/plan` runs the planner and returns apply/skip + confidence
+- `POST /jobs/:jobPostingId/tailor` plans first, then tailors only if approved
+- Web app at `apps/web` includes forms for upload, planner settings, manual job entry, and tailoring

@@ -4,6 +4,7 @@ import multipart from '@fastify/multipart';
 import fastifyStatic from '@fastify/static';
 import { resumeRoutes } from './routes/resumes.js';
 import { jobRoutes } from './routes/jobs.js';
+import { userRoutes } from './routes/users.js';
 import { storagePaths } from './lib/storage.js';
 
 export const buildApp = () => {
@@ -22,6 +23,7 @@ export const buildApp = () => {
   });
   app.register(resumeRoutes);
   app.register(jobRoutes);
+  app.register(userRoutes);
 
   app.get('/health', async () => ({
     ok: true,

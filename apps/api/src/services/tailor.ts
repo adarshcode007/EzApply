@@ -6,7 +6,7 @@ import { desc, eq } from 'drizzle-orm';
 import { db } from '../lib/db.js';
 import { ensureStorageDir, getPublicFileUrl } from '../lib/storage.js';
 import { agentRuns, applications, jobMatches, jobPostings, resumes, users } from '@applypilot/database';
-import { parsedResumeSchema } from '@applypilot/shared';
+import { parsedResumeSchema, type PlannerDecision } from '@applypilot/shared';
 
 const stopWords = new Set([
   'the',
@@ -56,10 +56,7 @@ const selectRelevantBullets = (bullets: string[], jobDescription: string) => {
   const scored = bullets
     .map((bullet) => {
       const normalizedBullet = normalize(bullet);
-      const score = keywords.reduce(
-        (acc, keyword) => acc + (normalizedBullet.includes(keyword) ? 1 : 0),
-        0,
-      );
+      const score = keywords.reduce((acc, keyword) => acc + (normalizedBullet.includes(keyword) ? 1 : 0), 0);
       return { bullet, score };
     })
     .filter((item) => item.score > 0)
@@ -78,7 +75,9 @@ const buildCoverLetter = (params: {
   const opener = `Dear Hiring Team at ${params.company},`;
   const intro =
     `I'm excited to apply for the ${params.title} role. ` +
-    (params.summary ? `My background aligns well with this position: ${params.summary}.` : 'I bring a strong track record of delivering practical, high-quality work.');
+    (params.summary
+      ? `My background aligns well with this position: ${params.summary}.`
+      : 'I bring a strong track record of delivering practical, high-quality work.');
   const middle = params.fitHighlights.length
     ? `A few reasons I am a strong fit: ${params.fitHighlights.join('; ')}.`
     : `My experience suggests a strong match with the role requirements and team needs.`;
@@ -103,9 +102,7 @@ const buildResumeDocx = async (params: {
             heading: HeadingLevel.TITLE,
           }),
           new Paragraph({
-            children: [
-              new TextRun({ text: `${params.jobTitle} at ${params.company}`, bold: true }),
-            ],
+            children: [new TextRun({ text: `${params.jobTitle} at ${params.company}`, bold: true })],
           }),
           params.resume.summary
             ? new Paragraph({
@@ -169,9 +166,7 @@ export const createManualJob = async (input: {
   postedAt?: string;
 }) => {
   const url = input.url?.trim() || `manual://${encodeURIComponent(input.company)}/${encodeURIComponent(input.title)}`;
-  const rawHtmlHash = createHash('sha256')
-    .update(JSON.stringify({ ...input, url }))
-    .digest('hex');
+  const rawHtmlHash = createHash('sha256').update(JSON.stringify({ ...input, url })).digest('hex');
 
   const [jobPosting] = await db
     .insert(jobPostings)
@@ -191,25 +186,21 @@ export const createManualJob = async (input: {
 
   if (jobPosting) return jobPosting;
 
-  const [existing] = await db
-    .select()
-    .from(jobPostings)
-    .where(eq(jobPostings.rawHtmlHash, rawHtmlHash))
-    .limit(1);
+  const [existing] = await db.select().from(jobPostings).where(eq(jobPostings.rawHtmlHash, rawHtmlHash)).limit(1);
 
   if (!existing) throw new Error('Failed to create or fetch manual job posting');
   return existing;
 };
 
-export const tailorSingleJob = async (input: { userEmail: string; jobPostingId: string }) => {
+export const tailorSingleJob = async (input: {
+  userEmail: string;
+  jobPostingId: string;
+  plannerDecision?: PlannerDecision;
+}) => {
   const [user] = await db.select().from(users).where(eq(users.email, input.userEmail)).limit(1);
   if (!user) throw new Error('User not found. Upload a resume first.');
 
-  const [jobPosting] = await db
-    .select()
-    .from(jobPostings)
-    .where(eq(jobPostings.id, input.jobPostingId))
-    .limit(1);
+  const [jobPosting] = await db.select().from(jobPostings).where(eq(jobPostings.id, input.jobPostingId)).limit(1);
   if (!jobPosting) throw new Error('Job posting not found');
 
   const [resumeRow] = await db
@@ -221,41 +212,53 @@ export const tailorSingleJob = async (input: { userEmail: string; jobPostingId: 
   if (!resumeRow) throw new Error('No resume found for this user');
 
   const resume = parsedResumeSchema.parse(resumeRow.parsedSectionsJson);
-  const fitHighlights = extractHighlights(resume.skills, jobPosting.description);
+  const fallbackFitHighlights = extractHighlights(resume.skills, jobPosting.description);
   const relevantExperienceBullets = resume.experience.flatMap((experience) =>
     selectRelevantBullets(experience.bullets ?? [], jobPosting.description),
   );
 
-  const scoreBase = Math.min(1, (fitHighlights.length + relevantExperienceBullets.length) / 8);
-  const confidence = Number((0.55 + scoreBase * 0.4).toFixed(2));
-  const matchScore = Number((scoreBase * 100).toFixed(2));
-  const reasoning =
-    fitHighlights.length > 0
-      ? `The resume has direct overlap with the job requirements, especially ${fitHighlights.join(', ')}.`
+  const fallbackScoreBase = Math.min(1, (fallbackFitHighlights.length + relevantExperienceBullets.length) / 8);
+  const fallbackConfidence = Number((0.55 + fallbackScoreBase * 0.4).toFixed(2));
+  const fallbackReasoning =
+    fallbackFitHighlights.length > 0
+      ? `The resume has direct overlap with the job requirements, especially ${fallbackFitHighlights.join(', ')}.`
       : 'The resume is structurally suitable, but keyword overlap with the job description is limited.';
+
+  const plannerDecision: PlannerDecision = input.plannerDecision ?? {
+    job_id: jobPosting.id,
+    decision: fallbackFitHighlights.length > 0 ? 'apply' : 'skip',
+    confidence: fallbackConfidence,
+    reasoning: fallbackReasoning,
+    red_flags: relevantExperienceBullets.length ? [] : ['Limited direct keyword overlap in resume bullets'],
+    fit_highlights: fallbackFitHighlights,
+  };
+
+  const fitHighlights = plannerDecision.fit_highlights;
+  const redFlags = plannerDecision.red_flags;
+  const plannerConfidence = plannerDecision.confidence;
 
   const [jobMatch] = await db
     .insert(jobMatches)
     .values({
       userId: user.id,
       jobPostingId: jobPosting.id,
-      matchScore,
-      matchReasoning: reasoning,
+      matchScore: Math.round(plannerConfidence * 10000) / 100,
+      matchReasoning: plannerDecision.reasoning,
       fitHighlights,
-      redFlags: relevantExperienceBullets.length ? [] : ['Limited direct keyword overlap in resume bullets'],
-      decision: 'apply',
-      confidence,
+      redFlags,
+      decision: plannerDecision.decision,
+      confidence: plannerConfidence,
       status: 'queued_for_tailoring',
     })
     .onConflictDoUpdate({
       target: [jobMatches.userId, jobMatches.jobPostingId],
       set: {
-        matchScore,
-        matchReasoning: reasoning,
+        matchScore: Math.round(plannerConfidence * 10000) / 100,
+        matchReasoning: plannerDecision.reasoning,
         fitHighlights,
-        redFlags: relevantExperienceBullets.length ? [] : ['Limited direct keyword overlap in resume bullets'],
-        decision: 'apply',
-        confidence,
+        redFlags,
+        decision: plannerDecision.decision,
+        confidence: plannerConfidence,
         status: 'queued_for_tailoring',
       },
     })
@@ -305,6 +308,7 @@ export const tailorSingleJob = async (input: { userEmail: string; jobPostingId: 
       inputJson: {
         jobPosting,
         resume: resumeRow.parsedSectionsJson,
+        plannerDecision,
       },
       outputJson: {
         jobMatch,
