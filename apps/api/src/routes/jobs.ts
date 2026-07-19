@@ -3,6 +3,7 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { createManualJob, tailorSingleJob } from '../services/tailor.js';
 import { planSingleJob } from '../services/planner.js';
+import { getJobGraphState, processSingleJobGraph, resumeSingleJobGraph } from '../services/job-graph.js';
 import { db } from '../lib/db.js';
 import { applications, jobMatches, jobPostings, users } from '@applypilot/database';
 import { plannerDecisionSchema } from '@applypilot/shared';
@@ -73,6 +74,72 @@ export const jobRoutes: FastifyPluginAsync = async (app) => {
     } catch (error) {
       return reply.status(400).send({
         error: error instanceof Error ? error.message : 'Failed to plan job',
+      });
+    }
+  });
+
+  app.post('/jobs/:jobPostingId/process', async (request, reply) => {
+    const params = z.object({ jobPostingId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid jobPostingId' });
+
+    const body = userEmailSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid process payload', details: body.error.flatten() });
+    }
+
+    try {
+      const result = await processSingleJobGraph({
+        userEmail: body.data.userEmail,
+        jobPostingId: params.data.jobPostingId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      return reply.status(400).send({
+        error: error instanceof Error ? error.message : 'Failed to process job graph',
+      });
+    }
+  });
+
+  app.post('/jobs/:jobPostingId/resume', async (request, reply) => {
+    const params = z.object({ jobPostingId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid jobPostingId' });
+
+    const body = userEmailSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.status(400).send({ error: 'Invalid resume payload', details: body.error.flatten() });
+    }
+
+    try {
+      const result = await resumeSingleJobGraph({
+        userEmail: body.data.userEmail,
+        jobPostingId: params.data.jobPostingId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      return reply.status(400).send({
+        error: error instanceof Error ? error.message : 'Failed to resume job graph',
+      });
+    }
+  });
+
+  app.get('/jobs/:jobPostingId/graph-state', async (request, reply) => {
+    const params = z.object({ jobPostingId: z.string().uuid() }).safeParse(request.params);
+    if (!params.success) return reply.status(400).send({ error: 'Invalid jobPostingId' });
+
+    const query = z.object({ userEmail: z.string().email() }).safeParse(request.query);
+    if (!query.success) {
+      return reply.status(400).send({ error: 'Invalid graph-state query', details: query.error.flatten() });
+    }
+
+    try {
+      const result = await getJobGraphState({
+        userEmail: query.data.userEmail,
+        jobPostingId: params.data.jobPostingId,
+      });
+      return reply.send(result);
+    } catch (error) {
+      return reply.status(400).send({
+        error: error instanceof Error ? error.message : 'Failed to fetch job graph state',
       });
     }
   });

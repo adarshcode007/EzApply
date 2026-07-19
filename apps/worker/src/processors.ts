@@ -1,6 +1,5 @@
 import { queueNames, type PlanJobPayload, type ScrapeJobPayload, type TailorJobPayload, type TrackJobPayload } from '@applypilot/pipeline';
 import { apiJson, apiRequest } from './api-client.js';
-import { enqueueTailorFlow } from './flows.js';
 import { createQueues } from './queue.js';
 
 export const buildProcessors = (redisUrl: string) => {
@@ -32,24 +31,20 @@ export const buildProcessors = (redisUrl: string) => {
   };
 
   const plan = async (job: { data: PlanJobPayload }) => {
-    const planner = await apiRequest<{
-      plannerDecision: { job_id: string; decision: 'apply' | 'skip'; confidence: number; reasoning: string; red_flags: string[]; fit_highlights: string[] };
-      route: 'tailor' | 'needs_review' | 'skip';
-    }>(`/jobs/${job.data.jobPostingId}/plan`, {
+    const result = await apiRequest<{
+      threadId: string;
+      state: {
+        route?: 'tailor' | 'needs_review' | 'skip';
+        plannerDecision?: unknown;
+        tailoredResult?: unknown;
+        trackResult?: unknown;
+      };
+    }>(`/jobs/${job.data.jobPostingId}/process`, {
       method: 'POST',
       body: apiJson({ userEmail: job.data.userEmail }),
     });
 
-    if (planner.route === 'tailor') {
-      await enqueueTailorFlow({
-        redisUrl,
-        userEmail: job.data.userEmail,
-        jobPostingId: job.data.jobPostingId,
-        plannerDecision: planner.plannerDecision,
-      });
-    }
-
-    return planner;
+    return result;
   };
 
   const tailor = async (job: { data: TailorJobPayload }) => {

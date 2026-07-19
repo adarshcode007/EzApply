@@ -1,7 +1,13 @@
 import { desc, eq } from 'drizzle-orm';
 import { db } from '../lib/db.js';
 import { agentRuns, jobMatches, jobPostings, resumes, users } from '@applypilot/database';
-import { parsedResumeSchema, plannerDecisionSchema, type PlannerDecision, type PlannerRoute } from '@applypilot/shared';
+import {
+  parsedResumeSchema,
+  plannerDecisionSchema,
+  type PlannerDecision,
+  type PlannerRoute,
+} from '@applypilot/shared';
+import { generateStructuredObject, hasOpenAI } from './openai.js';
 
 const stopWords = new Set([
   'the',
@@ -46,7 +52,7 @@ const keywordSet = (text: string) =>
       .filter((word) => !stopWords.has(word)) ?? [],
   );
 
-const scoreJob = (resume: ReturnType<typeof parsedResumeSchema.parse>, description: string) => {
+const heuristicPlanner = (resume: ReturnType<typeof parsedResumeSchema.parse>, description: string) => {
   const jobKeywords = keywordSet(description);
   const resumeSkills = resume.skills.map(normalize);
   const experienceBullets = resume.experience.flatMap((exp) => exp.bullets ?? []).map(normalize);
@@ -65,11 +71,17 @@ const scoreJob = (resume: ReturnType<typeof parsedResumeSchema.parse>, descripti
   ];
 
   const missingKeywords = Array.from(jobKeywords)
-    .filter((keyword) => !resumeSkills.includes(keyword) && !experienceBullets.some((bullet) => bullet.includes(keyword)))
+    .filter(
+      (keyword) =>
+        !resumeSkills.includes(keyword) && !experienceBullets.some((bullet) => bullet.includes(keyword)),
+    )
     .slice(0, 3);
 
   const redFlags = missingKeywords.map((keyword) => `No clear evidence for ${keyword}`);
-  const rawScore = Math.min(1, matchedSkills.length * 0.22 + matchedBullets.length * 0.12 + fitHighlights.length * 0.08);
+  const rawScore = Math.min(
+    1,
+    matchedSkills.length * 0.22 + matchedBullets.length * 0.12 + fitHighlights.length * 0.08,
+  );
   const confidence = Number(Math.min(0.99, Math.max(0.08, rawScore + 0.18)).toFixed(2));
   const decision = matchedSkills.length >= 1 || matchedBullets.length >= 2 ? 'apply' : 'skip';
   const reasoning =
@@ -81,10 +93,42 @@ const scoreJob = (resume: ReturnType<typeof parsedResumeSchema.parse>, descripti
     decision,
     confidence,
     reasoning,
-    redFlags,
-    fitHighlights,
+    red_flags: redFlags,
+    fit_highlights: fitHighlights,
+    tokensUsed: 0,
   };
 };
+
+const buildPlannerPrompt = (input: {
+  userEmail: string;
+  preferences: unknown;
+  resume: unknown;
+  jobPosting: unknown;
+}) => {
+  return [
+    'Evaluate whether this user should apply to the job posting.',
+    'You must decide apply or skip.',
+    'Confidence must be between 0 and 1.',
+    'Reasoning must be concise and based only on the provided resume and job posting.',
+    'Red flags should be real concerns or missing evidence from the resume.',
+    'Fit highlights should be concrete strengths from the resume that align with the role.',
+    'Do not invent facts that are not present in the resume.',
+    '',
+    `User email: ${input.userEmail}`,
+    `Preferences JSON: ${JSON.stringify(input.preferences, null, 2)}`,
+    `Parsed resume JSON: ${JSON.stringify(input.resume, null, 2)}`,
+    `Job posting JSON: ${JSON.stringify(input.jobPosting, null, 2)}`,
+  ].join('\n');
+};
+
+const buildPlannerSystem = () =>
+  [
+    'You are ApplyPilot’s planner agent.',
+    'Return structured data only.',
+    'Choose apply only when the resume shows credible alignment with the role.',
+    'Choose skip when alignment is weak, risky, or not supported by the resume.',
+    'Be conservative and honest.',
+  ].join(' ');
 
 export const planSingleJob = async (input: { userEmail: string; jobPostingId: string }) => {
   const [user] = await db.select().from(users).where(eq(users.email, input.userEmail)).limit(1);
@@ -106,18 +150,39 @@ export const planSingleJob = async (input: { userEmail: string; jobPostingId: st
   if (!resumeRow) throw new Error('No resume found for this user');
 
   const resume = parsedResumeSchema.parse(resumeRow.parsedSectionsJson);
-  const scored = scoreJob(resume, jobPosting.description);
   const autonomyThreshold = Number(
     (user.preferencesJson as { autonomyThreshold?: number } | null | undefined)?.autonomyThreshold ?? 0.7,
   );
+
+  const llmOutput = hasOpenAI
+    ? await generateStructuredObject({
+        schemaName: 'planner_decision',
+        schema: plannerDecisionSchema,
+        system: buildPlannerSystem(),
+        prompt: buildPlannerPrompt({
+          userEmail: user.email,
+          preferences: user.preferencesJson,
+          resume,
+          jobPosting,
+        }),
+        temperature: 0.1,
+        maxTokens: 900,
+        retries: 1,
+      })
+    : {
+        data: plannerDecisionSchema.parse({
+          job_id: jobPosting.id,
+          ...heuristicPlanner(resume, jobPosting.description),
+        }),
+        tokensUsed: 0,
+        model: 'heuristic-fallback',
+      };
+
   const plannerDecision: PlannerDecision = plannerDecisionSchema.parse({
+    ...llmOutput.data,
     job_id: jobPosting.id,
-    decision: scored.decision,
-    confidence: scored.confidence,
-    reasoning: scored.reasoning,
-    red_flags: scored.redFlags,
-    fit_highlights: scored.fitHighlights,
   });
+
   const route: PlannerRoute =
     plannerDecision.decision === 'skip'
       ? 'skip'
@@ -136,7 +201,8 @@ export const planSingleJob = async (input: { userEmail: string; jobPostingId: st
       redFlags: plannerDecision.red_flags,
       decision: plannerDecision.decision,
       confidence: plannerDecision.confidence,
-      status: route === 'tailor' ? 'queued_for_tailoring' : route === 'needs_review' ? 'needs_review' : 'rejected',
+      status:
+        route === 'tailor' ? 'queued_for_tailoring' : route === 'needs_review' ? 'needs_review' : 'rejected',
     })
     .onConflictDoUpdate({
       target: [jobMatches.userId, jobMatches.jobPostingId],
@@ -147,7 +213,12 @@ export const planSingleJob = async (input: { userEmail: string; jobPostingId: st
         redFlags: plannerDecision.red_flags,
         decision: plannerDecision.decision,
         confidence: plannerDecision.confidence,
-        status: route === 'tailor' ? 'queued_for_tailoring' : route === 'needs_review' ? 'needs_review' : 'rejected',
+        status:
+          route === 'tailor'
+            ? 'queued_for_tailoring'
+            : route === 'needs_review'
+              ? 'needs_review'
+              : 'rejected',
       },
     })
     .returning();
@@ -160,14 +231,16 @@ export const planSingleJob = async (input: { userEmail: string; jobPostingId: st
       userEmail: user.email,
       resume: resumeRow.parsedSectionsJson,
       jobPosting,
+      preferences: user.preferencesJson,
       autonomyThreshold,
     },
     outputJson: {
       plannerDecision,
       route,
       jobMatch,
+      model: llmOutput.model,
     },
-    tokensUsed: 0,
+    tokensUsed: llmOutput.tokensUsed,
     costUsd: '0.0000',
     status: 'success',
   });

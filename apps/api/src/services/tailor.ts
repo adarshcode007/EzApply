@@ -6,7 +6,13 @@ import { desc, eq } from 'drizzle-orm';
 import { db } from '../lib/db.js';
 import { ensureStorageDir, getPublicFileUrl } from '../lib/storage.js';
 import { agentRuns, applications, jobMatches, jobPostings, resumes, users } from '@applypilot/database';
-import { parsedResumeSchema, type PlannerDecision } from '@applypilot/shared';
+import {
+  parsedResumeSchema,
+  tailorOutputSchema,
+  type PlannerDecision,
+  type TailoredResume,
+} from '@applypilot/shared';
+import { generateStructuredObject, hasOpenAI } from './openai.js';
 
 const stopWords = new Set([
   'the',
@@ -56,7 +62,10 @@ const selectRelevantBullets = (bullets: string[], jobDescription: string) => {
   const scored = bullets
     .map((bullet) => {
       const normalizedBullet = normalize(bullet);
-      const score = keywords.reduce((acc, keyword) => acc + (normalizedBullet.includes(keyword) ? 1 : 0), 0);
+      const score = keywords.reduce(
+        (acc, keyword) => acc + (normalizedBullet.includes(keyword) ? 1 : 0),
+        0,
+      );
       return { bullet, score };
     })
     .filter((item) => item.score > 0)
@@ -65,7 +74,20 @@ const selectRelevantBullets = (bullets: string[], jobDescription: string) => {
   return scored.slice(0, 3).map((item) => item.bullet);
 };
 
-const buildCoverLetter = (params: {
+const mergeTailoredResume = (
+  original: ReturnType<typeof parsedResumeSchema.parse>,
+  tailored: TailoredResume,
+): TailoredResume => ({
+  summary: tailored.summary ?? original.summary,
+  skills: tailored.skills.length ? tailored.skills : original.skills,
+  experience: tailored.experience.length ? tailored.experience : original.experience,
+  education: tailored.education.length ? tailored.education : original.education,
+  projects: tailored.projects.length ? tailored.projects : original.projects,
+  certifications: tailored.certifications.length ? tailored.certifications : original.certifications,
+  languages: tailored.languages.length ? tailored.languages : original.languages,
+});
+
+const buildFallbackCoverLetter = (params: {
   userEmail: string;
   company: string;
   title: string;
@@ -83,14 +105,16 @@ const buildCoverLetter = (params: {
     : `My experience suggests a strong match with the role requirements and team needs.`;
   const close = `I'd welcome the chance to discuss how I can contribute to ${params.company}. Thank you for your time and consideration.`;
 
-  return [opener, '', intro, '', middle, '', close, '', `Sincerely,`, params.userEmail.split('@')[0]].join('\n');
+  return [opener, '', intro, '', middle, '', close, '', `Sincerely,`, params.userEmail.split('@')[0]].join(
+    '\n',
+  );
 };
 
 const buildResumeDocx = async (params: {
   userEmail: string;
   jobTitle: string;
   company: string;
-  resume: ReturnType<typeof parsedResumeSchema.parse>;
+  resume: TailoredResume;
 }) => {
   const doc = new Document({
     sections: [
@@ -105,9 +129,7 @@ const buildResumeDocx = async (params: {
             children: [new TextRun({ text: `${params.jobTitle} at ${params.company}`, bold: true })],
           }),
           params.resume.summary
-            ? new Paragraph({
-                text: `Summary: ${params.resume.summary}`,
-              })
+            ? new Paragraph({ text: `Summary: ${params.resume.summary}` })
             : new Paragraph({ text: 'Summary: Tailored from structured resume data.' }),
           new Paragraph({ text: 'Skills', heading: HeadingLevel.HEADING_1 }),
           new Paragraph({ text: params.resume.skills.join(', ') || 'No skills parsed yet.' }),
@@ -115,10 +137,13 @@ const buildResumeDocx = async (params: {
           ...params.resume.experience.flatMap((item) => [
             new Paragraph({
               children: [
-                new TextRun({ text: `${item.title ?? 'Role'}${item.company ? ` — ${item.company}` : ''}`, bold: true }),
+                new TextRun({
+                  text: `${item.title ?? 'Role'}${item.company ? ` — ${item.company}` : ''}`,
+                  bold: true,
+                }),
               ],
             }),
-            ...(item.bullets ?? []).slice(0, 4).map(
+            ...(item.bullets ?? []).slice(0, 5).map(
               (bullet) =>
                 new Paragraph({
                   text: bullet,
@@ -155,6 +180,35 @@ const buildResumeDocx = async (params: {
   };
 };
 
+const buildTailorSystem = () =>
+  [
+    'You are ApplyPilot’s tailoring agent.',
+    'You may only use facts already present in the source resume.',
+    'Do not invent experience, skills, credentials, education, dates, or achievements.',
+    'Optimize phrasing and emphasis for ATS alignment while preserving truthfulness.',
+    'Return structured data only.',
+  ].join(' ');
+
+const buildTailorPrompt = (input: {
+  userEmail: string;
+  plannerDecision: PlannerDecision;
+  resume: unknown;
+  jobPosting: unknown;
+  tone?: unknown;
+}) =>
+  [
+    'Tailor the resume and cover letter for this job posting.',
+    'Reword and reorder only within the boundaries of the source resume facts.',
+    'If something is missing from the resume, do not add it.',
+    'Create a concise, professional cover letter draft.',
+    '',
+    `User email: ${input.userEmail}`,
+    `Preferred tone: ${JSON.stringify(input.tone)}`,
+    `Planner decision JSON: ${JSON.stringify(input.plannerDecision, null, 2)}`,
+    `Parsed resume JSON: ${JSON.stringify(input.resume, null, 2)}`,
+    `Job posting JSON: ${JSON.stringify(input.jobPosting, null, 2)}`,
+  ].join('\n');
+
 export const createManualJob = async (input: {
   source?: 'manual';
   title: string;
@@ -186,7 +240,11 @@ export const createManualJob = async (input: {
 
   if (jobPosting) return jobPosting;
 
-  const [existing] = await db.select().from(jobPostings).where(eq(jobPostings.rawHtmlHash, rawHtmlHash)).limit(1);
+  const [existing] = await db
+    .select()
+    .from(jobPostings)
+    .where(eq(jobPostings.rawHtmlHash, rawHtmlHash))
+    .limit(1);
 
   if (!existing) throw new Error('Failed to create or fetch manual job posting');
   return existing;
@@ -200,7 +258,11 @@ export const tailorSingleJob = async (input: {
   const [user] = await db.select().from(users).where(eq(users.email, input.userEmail)).limit(1);
   if (!user) throw new Error('User not found. Upload a resume first.');
 
-  const [jobPosting] = await db.select().from(jobPostings).where(eq(jobPostings.id, input.jobPostingId)).limit(1);
+  const [jobPosting] = await db
+    .select()
+    .from(jobPostings)
+    .where(eq(jobPostings.id, input.jobPostingId))
+    .limit(1);
   if (!jobPosting) throw new Error('Job posting not found');
 
   const [resumeRow] = await db
@@ -211,31 +273,71 @@ export const tailorSingleJob = async (input: {
     .limit(1);
   if (!resumeRow) throw new Error('No resume found for this user');
 
-  const resume = parsedResumeSchema.parse(resumeRow.parsedSectionsJson);
-  const fallbackFitHighlights = extractHighlights(resume.skills, jobPosting.description);
-  const relevantExperienceBullets = resume.experience.flatMap((experience) =>
+  const sourceResume = parsedResumeSchema.parse(resumeRow.parsedSectionsJson);
+  const fallbackFitHighlights = extractHighlights(sourceResume.skills, jobPosting.description);
+  const relevantExperienceBullets = sourceResume.experience.flatMap((experience) =>
     selectRelevantBullets(experience.bullets ?? [], jobPosting.description),
   );
 
-  const fallbackScoreBase = Math.min(1, (fallbackFitHighlights.length + relevantExperienceBullets.length) / 8);
-  const fallbackConfidence = Number((0.55 + fallbackScoreBase * 0.4).toFixed(2));
-  const fallbackReasoning =
-    fallbackFitHighlights.length > 0
-      ? `The resume has direct overlap with the job requirements, especially ${fallbackFitHighlights.join(', ')}.`
-      : 'The resume is structurally suitable, but keyword overlap with the job description is limited.';
-
-  const plannerDecision: PlannerDecision = input.plannerDecision ?? {
+  const fallbackPlannerDecision: PlannerDecision = input.plannerDecision ?? {
     job_id: jobPosting.id,
     decision: fallbackFitHighlights.length > 0 ? 'apply' : 'skip',
-    confidence: fallbackConfidence,
-    reasoning: fallbackReasoning,
+    confidence: Number((0.55 + Math.min(1, (fallbackFitHighlights.length + relevantExperienceBullets.length) / 8) * 0.4).toFixed(2)),
+    reasoning:
+      fallbackFitHighlights.length > 0
+        ? `The resume has direct overlap with the job requirements, especially ${fallbackFitHighlights.join(', ')}.`
+        : 'The resume is structurally suitable, but keyword overlap with the job description is limited.',
     red_flags: relevantExperienceBullets.length ? [] : ['Limited direct keyword overlap in resume bullets'],
     fit_highlights: fallbackFitHighlights,
   };
 
-  const fitHighlights = plannerDecision.fit_highlights;
-  const redFlags = plannerDecision.red_flags;
-  const plannerConfidence = plannerDecision.confidence;
+  const llmOutput = hasOpenAI
+    ? await generateStructuredObject({
+        schemaName: 'tailor_output',
+        schema: tailorOutputSchema,
+        system: buildTailorSystem(),
+        prompt: buildTailorPrompt({
+          userEmail: user.email,
+          plannerDecision: fallbackPlannerDecision,
+          resume: sourceResume,
+          jobPosting,
+          tone: (user.preferencesJson as { tone?: string } | null | undefined)?.tone,
+        }),
+        temperature: 0.2,
+        maxTokens: 1600,
+        retries: 1,
+      })
+    : {
+        data: tailorOutputSchema.parse({
+          resume: {
+            ...sourceResume,
+            summary: sourceResume.summary,
+            skills: sourceResume.skills,
+            experience: sourceResume.experience.map((item) => ({
+              ...item,
+              bullets: item.bullets?.length ? item.bullets : relevantExperienceBullets,
+            })),
+          },
+          coverLetterText: buildFallbackCoverLetter({
+            userEmail: user.email,
+            company: jobPosting.company,
+            title: jobPosting.title,
+            fitHighlights: fallbackPlannerDecision.fit_highlights,
+            summary: sourceResume.summary,
+          }),
+          fitHighlights: fallbackPlannerDecision.fit_highlights,
+          complianceNotes: ['Heuristic fallback used because OPENAI_API_KEY is missing.'],
+        }),
+        tokensUsed: 0,
+        model: 'heuristic-fallback',
+      };
+
+  const tailoredResume = mergeTailoredResume(sourceResume, llmOutput.data.resume);
+  const fitHighlights = llmOutput.data.fitHighlights.length
+    ? llmOutput.data.fitHighlights
+    : fallbackPlannerDecision.fit_highlights;
+  const redFlags = fallbackPlannerDecision.red_flags;
+  const plannerConfidence = fallbackPlannerDecision.confidence;
 
   const [jobMatch] = await db
     .insert(jobMatches)
@@ -243,10 +345,10 @@ export const tailorSingleJob = async (input: {
       userId: user.id,
       jobPostingId: jobPosting.id,
       matchScore: Math.round(plannerConfidence * 10000) / 100,
-      matchReasoning: plannerDecision.reasoning,
+      matchReasoning: fallbackPlannerDecision.reasoning,
       fitHighlights,
       redFlags,
-      decision: plannerDecision.decision,
+      decision: fallbackPlannerDecision.decision,
       confidence: plannerConfidence,
       status: 'queued_for_tailoring',
     })
@@ -254,29 +356,21 @@ export const tailorSingleJob = async (input: {
       target: [jobMatches.userId, jobMatches.jobPostingId],
       set: {
         matchScore: Math.round(plannerConfidence * 10000) / 100,
-        matchReasoning: plannerDecision.reasoning,
+        matchReasoning: fallbackPlannerDecision.reasoning,
         fitHighlights,
         redFlags,
-        decision: plannerDecision.decision,
+        decision: fallbackPlannerDecision.decision,
         confidence: plannerConfidence,
         status: 'queued_for_tailoring',
       },
     })
     .returning();
 
-  const coverLetterText = buildCoverLetter({
-    userEmail: user.email,
-    company: jobPosting.company,
-    title: jobPosting.title,
-    fitHighlights,
-    summary: resume.summary,
-  });
-
   const docx = await buildResumeDocx({
     userEmail: user.email,
     jobTitle: jobPosting.title,
     company: jobPosting.company,
-    resume,
+    resume: tailoredResume,
   });
 
   const [application] = await db
@@ -285,7 +379,7 @@ export const tailorSingleJob = async (input: {
       userId: user.id,
       jobPostingId: jobPosting.id,
       tailoredResumeUrl: docx.url,
-      coverLetterText,
+      coverLetterText: llmOutput.data.coverLetterText,
       status: 'ready_for_review',
       humanOverridden: false,
     })
@@ -293,7 +387,7 @@ export const tailorSingleJob = async (input: {
       target: [applications.userId, applications.jobPostingId],
       set: {
         tailoredResumeUrl: docx.url,
-        coverLetterText,
+        coverLetterText: llmOutput.data.coverLetterText,
         status: 'ready_for_review',
         humanOverridden: false,
       },
@@ -303,33 +397,20 @@ export const tailorSingleJob = async (input: {
   await db.insert(agentRuns).values([
     {
       userId: user.id,
-      agentType: 'matcher',
-      jobPostingId: jobPosting.id,
-      inputJson: {
-        jobPosting,
-        resume: resumeRow.parsedSectionsJson,
-        plannerDecision,
-      },
-      outputJson: {
-        jobMatch,
-      },
-      tokensUsed: 0,
-      costUsd: '0.0000',
-      status: 'success',
-    },
-    {
-      userId: user.id,
       agentType: 'tailor_resume',
       jobPostingId: jobPosting.id,
       inputJson: {
         resume: resumeRow.parsedSectionsJson,
         jobDescription: jobPosting.description,
+        plannerDecision: fallbackPlannerDecision,
       },
       outputJson: {
+        tailoredResume,
         tailoredResumeUrl: docx.url,
-        relevantExperienceBullets,
+        complianceNotes: llmOutput.data.complianceNotes,
+        model: llmOutput.model,
       },
-      tokensUsed: 0,
+      tokensUsed: llmOutput.tokensUsed,
       costUsd: '0.0000',
       status: 'success',
     },
@@ -342,9 +423,9 @@ export const tailorSingleJob = async (input: {
         company: jobPosting.company,
       },
       outputJson: {
-        coverLetterText,
+        coverLetterText: llmOutput.data.coverLetterText,
       },
-      tokensUsed: 0,
+      tokensUsed: llmOutput.tokensUsed,
       costUsd: '0.0000',
       status: 'success',
     },
@@ -358,9 +439,11 @@ export const tailorSingleJob = async (input: {
     tailoredResume: {
       ...docx,
       fileName: basename(docx.fileName),
+      parsedSections: tailoredResume,
     },
-    coverLetterText,
+    coverLetterText: llmOutput.data.coverLetterText,
     fitHighlights,
     relevantExperienceBullets,
+    complianceNotes: llmOutput.data.complianceNotes,
   };
 };
